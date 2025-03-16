@@ -1,0 +1,112 @@
+import boto3
+import datetime
+import logging
+import json
+import os
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def lambda_handler(event, context):
+    # Check an environment variable DRY_RUN; default to True here for safety.
+    dry_run_str = os.environ.get("DRY_RUN", "true").lower()
+    dry_run = (dry_run_str == "true")
+
+    # We'll treat November 1, 2024 (UTC) as our cutoff
+    cutoff_date = datetime.datetime(2024, 11, 1, tzinfo=datetime.timezone.utc)
+    
+    ec2_client = boto3.client("ec2")
+    logger.info("Describing all EC2 instances...")
+
+    response = ec2_client.describe_instances()
+    affected_instances = []  # we'll collect data about which instances WOULD be tagged
+
+    for reservation in response.get("Reservations", []):
+        for instance in reservation.get("Instances", []):
+            instance_id = instance["InstanceId"]
+            name_tag = None
+
+            # Find the Name tag if present
+            for tag in instance.get("Tags", []):
+                if tag["Key"] == "Name":
+                    name_tag = tag["Value"]
+                    break
+
+            if name_tag == "master_image":
+                logger.info(f"Skipping instance {instance_id} because Name=master_image.")
+                continue
+
+            root_device_name = instance.get("RootDeviceName")
+            root_volume_id = None
+
+            # Find the root volume by matching the root device
+            for bdm in instance.get("BlockDeviceMappings", []):
+                if bdm["DeviceName"] == root_device_name and "Ebs" in bdm:
+                    root_volume_id = bdm["Ebs"]["VolumeId"]
+                    break
+
+            if not root_volume_id:
+                logger.warning(f"Instance {instance_id} has no identifiable root volume. Skipping.")
+                continue
+
+            # Describe the root volume to get its creation time
+            try:
+                volume_response = ec2_client.describe_volumes(VolumeIds=[root_volume_id])
+                root_volume = volume_response["Volumes"][0]
+                volume_create_time = root_volume["CreateTime"]  # datetime object (UTC)
+            except Exception as e:
+                logger.error(
+                    f"Failed to describe volume {root_volume_id} for instance {instance_id}.",
+                    exc_info=True
+                )
+                continue
+
+            # Decide DaysRemaining based on the volume creation time
+            if volume_create_time < cutoff_date:
+                days_remaining = "5"
+            else:
+                days_remaining = "90"
+
+            # Collect info about this instance for the report
+            instance_info = {
+                "InstanceId": instance_id,
+                "InstanceName": name_tag or "NoNameTag",
+                "RootVolumeId": root_volume_id,
+                "VolumeCreateTime": volume_create_time.isoformat(),
+                "ProposedDaysRemaining": days_remaining
+            }
+            affected_instances.append(instance_info)
+
+            if dry_run:
+                logger.info(
+                    f"[DRY_RUN] Would tag instance {instance_id} with "
+                    f"DaysRemaining={days_remaining}, ConversionComplete=y "
+                    f"(root volume created at {volume_create_time})."
+                )
+            else:
+                # If not in dry run, actually create/update the tags
+                try:
+                    ec2_client.create_tags(
+                        Resources=[instance_id],
+                        Tags=[
+                            {"Key": "DaysRemaining", "Value": days_remaining},
+                            {"Key": "ConversionComplete", "Value": "y"}
+                        ]
+                    )
+                    logger.info(
+                        f"Instance {instance_id} => tagged DaysRemaining={days_remaining}, "
+                        f"ConversionComplete=y (root volume creation time: {volume_create_time})"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to tag instance {instance_id}. Error: {str(e)}", exc_info=True)
+
+    logger.info("Tagging process (based on volume creation time) completed. DRY_RUN=%s", dry_run)
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "dry_run": dry_run,
+            "affected_count": len(affected_instances),
+            "affected_instances": affected_instances
+        }, default=str, indent=2)  # default=str to handle datetime serialization
+    }
