@@ -1,0 +1,60 @@
+import boto3
+import logging
+import os
+import json
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def lambda_handler(event, context):
+    # Check an environment variable DRY_RUN; default to True here for safety.
+    dry_run_str = os.environ.get("DRY_RUN", "true").lower()
+    dry_run = (dry_run_str == "true")
+
+    logger.info("Looking for instances with DaysRemaining=-1, ConversionComplete=y")
+
+    ec2_client = boto3.client("ec2")
+
+    try:
+        # Filter: DaysRemaining=-1, ConversionComplete=y, and instance is in a terminable state
+        response = ec2_client.describe_instances(
+            Filters=[
+                {"Name": "tag:DaysRemaining", "Values": ["-1"]},
+                {"Name": "tag:ConversionComplete", "Values": ["y"]},
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["running", "stopped", "stopping", "pending"]
+                }
+            ]
+        )
+    except Exception as e:
+        logger.error("Failed to describe instances for termination.", exc_info=True)
+        raise
+
+    instances_to_terminate = []
+    for reservation in response.get("Reservations", []):
+        for instance in reservation.get("Instances", []):
+            instance_id = instance["InstanceId"]
+            instances_to_terminate.append(instance_id)
+
+    if not instances_to_terminate:
+        logger.info("No matching instances found. Nothing to terminate.")
+    else:
+        if dry_run:
+            logger.info(f"[DRY_RUN] Would terminate these instances: {instances_to_terminate}")
+        else:
+            logger.info(f"Terminating instances: {instances_to_terminate}")
+            try:
+                ec2_client.terminate_instances(InstanceIds=instances_to_terminate)
+                logger.info("Termination request sent successfully.")
+            except Exception as e:
+                logger.error("Failed to terminate instances.", exc_info=True)
+
+    # Return info about what we found/did
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "dry_run": dry_run,
+            "instances_to_terminate": instances_to_terminate
+        })
+    }

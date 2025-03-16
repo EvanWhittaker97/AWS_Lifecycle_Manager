@@ -1,0 +1,61 @@
+import boto3
+import logging
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def lambda_handler(event, context):
+    logger.info("Starting daily decrement of DaysRemaining for instances with ConversionComplete = y")
+
+    ec2_client = boto3.client("ec2")
+
+    # Filter only instances where ConversionComplete = y
+    try:
+        response = ec2_client.describe_instances(
+            Filters=[
+                {"Name": "tag:ConversionComplete", "Values": ["y"]}
+            ]
+        )
+    except Exception as e:
+        logger.error("Failed to describe instances.", exc_info=True)
+        raise
+
+    for reservation in response.get("Reservations", []):
+        for instance in reservation.get("Instances", []):
+            instance_id = instance["InstanceId"]
+            tags = instance.get("Tags", [])
+
+            # Convert the list of tags into a dict
+            tag_dict = {tag["Key"]: tag["Value"] for tag in tags}
+
+            # Check if DaysRemaining is present
+            if "DaysRemaining" in tag_dict:
+                try:
+                    days_remaining = int(tag_dict["DaysRemaining"])
+                except ValueError:
+                    logger.warning(f"Instance {instance_id} has invalid DaysRemaining value '{tag_dict['DaysRemaining']}'. Skipping.")
+                    continue
+
+                # Only decrement if > -1
+                if days_remaining > -1:
+                    new_days_remaining = days_remaining - 1
+
+                    # Update the DaysRemaining tag
+                    try:
+                        ec2_client.create_tags(
+                            Resources=[instance_id],
+                            Tags=[{"Key": "DaysRemaining", "Value": str(new_days_remaining)}]
+                        )
+                        logger.info(
+                            f"Instance {instance_id}: DaysRemaining updated "
+                            f"from {days_remaining} to {new_days_remaining}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to update DaysRemaining for instance {instance_id}", exc_info=True)
+                else:
+                    logger.info(f"Instance {instance_id} already at 0. No decrement needed.")
+            else:
+                logger.debug(f"Instance {instance_id} does not have 'DaysRemaining'. Skipping.")
+
+    logger.info("Lambda run complete.")
+    return {"statusCode": 200, "body": "DaysRemaining decrement logic executed successfully."}
