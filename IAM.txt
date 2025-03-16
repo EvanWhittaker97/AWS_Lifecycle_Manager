@@ -1,0 +1,26 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "EC2DescribeAndTag",
+			"Effect": "Allow",
+			"Action": [
+				"ec2:DescribeInstances",
+				"ec2:CreateTags",
+				"ec2:TerminateInstances",
+				"ec2:DescribeVolumes"
+			],
+			"Resource": "*"
+		},
+		{
+			"Sid": "AllowLambdaLogging",
+			"Effect": "Allow",
+			"Action": [
+				"logs:CreateLogGroup",
+				"logs:CreateLogStream",
+				"logs:PutLogEvents"
+			],
+			"Resource": "*"
+		}
+	]
+}
